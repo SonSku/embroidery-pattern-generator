@@ -14,6 +14,7 @@ import string
 
 SYMBOL_POOL = list(string.digits[1:] + string.digits[:1]) + list(string.ascii_uppercase) + list(string.ascii_lowercase) + list("!@#$%&*+=?")
 
+# calculate optimal cell size for the pattern size on specific page
 def calculate_optimal_cell_size(pattern_width, pattern_height, margin_mm):
     page_width_mm = A4[0] / mm
     page_height_mm = A4[1] / mm
@@ -33,16 +34,62 @@ def calculate_optimal_cell_size(pattern_width, pattern_height, margin_mm):
 
     return max_cell_size
 
+# assign codes to all used colors
 def assign_symbols(codes: list[str]) -> dict[str, str]:
     unique_codes = sorted(set(codes))
-    if len(unique_codes) > len(SYMBOL_POOL):
+    if len(unique_codes) > len(SYMBOL_POOL): # in case there are too many colors
         raise ValueError(f"Too many colors ({len(unique_codes)})for symbol pool ({len(SYMBOL_POOL)})")
     return {code: SYMBOL_POOL[i] for i, code in enumerate(unique_codes)}
 
+# determine which color the symbol should be for the better contrast
+# L (luminance) goes up to 100 but instead of threshold of 50 it's 55 because human eye sees better darker symbols
 def get_symbol_color(lightness: float, threshold: float = 55.0) -> colors.Color:
-    return colors.HexColor("#000000") if lightness > threshold else colors.HexColor("#FFFFFF")
+    if lightness > threshold:
+        return colors.HexColor("#000000")
+    else:
+        return colors.HexColor("#FFFFFF")
 
+# function for drawing color legend in pdf
+def draw_legend_page(
+    c: canvas.Canvas,
+    used_colors: pd.DataFrame,
+    code_to_symbol: dict,
+    page_width: float,
+    page_height: float,
+) -> None:
+    margin = 20 * mm
+    row_height = 8 * mm
+    swatch_size = 6 * mm
 
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(page_width / 2, page_height - margin, "Legend / Color List")
+
+    y = page_height - margin - 15 * mm
+    c.setFont("Helvetica", 10)
+
+    for _, row in used_colors.iterrows():
+        code = row["code"]
+        symbol = code_to_symbol[code]
+
+        c.setFillColor(row["hex"])
+        c.rect(margin, y, swatch_size, swatch_size, fill=1, stroke=1)
+
+        lightness = row.get("L", 100)
+        c.setFillColor(get_symbol_color(lightness))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawCentredString(margin + swatch_size / 2, y + swatch_size * 0.3, symbol)
+
+        c.setFillColor(colors.HexColor("#000000"))
+        c.setFont("Helvetica", 10)
+        text = f"DMC {code} - {row['name']}  ({row['count']} stitches)"
+        c.drawString(margin + swatch_size + 5 * mm, y + swatch_size * 0.3, text)
+
+        y -= row_height
+        if y < margin:
+            c.showPage()
+            y = page_height - margin
+
+# main function for generating pattern pdf out of image (converted to grid and dmc vals)
 def export_pattern_to_pdf(
     grid_codes: np.ndarray,
     dmc_df: pd.DataFrame,
@@ -51,22 +98,33 @@ def export_pattern_to_pdf(
 
     n_rows, n_cols = grid_codes.shape
 
-    if "L" not in dmc_df.columns:
+    # in case theres no LAB colors in DataFrame
+    if "L" not in dmc_df.columns: 
         from src.colors.dmc import rgb_to_lab
         dmc_df = rgb_to_lab(dmc_df)
 
-    code_to_hex = dict(zip(dmc_df["code"], dmc_df["hex"]))
-    code_to_lightness = dict(zip(dmc_df["code"], dmc_df["L"]))
-    code_to_symbol = assign_symbols(grid_codes.flatten().tolist())
+    code_to_hex = dict(zip(dmc_df["code"], dmc_df["hex"])) # map code to hex (easier to find one row than to search for color by three rows - R, B, G or L, a, b)
+    code_to_lightness = dict(zip(dmc_df["code"], dmc_df["L"])) # map L (Lightness) to easier determine symbol color
+    code_to_symbol = assign_symbols(grid_codes.flatten().tolist()) # map symbols to colors
 
+    unique_codes, counts = np.unique(grid_codes, return_counts=True) # count unique colors used
+    usage_dict = dict(zip(unique_codes, counts)) # count the amount of stitches (cells) for every used color
+    
+    used_colors = dmc_df[dmc_df["code"].isin(unique_codes)].copy() # create used colors list for legend generation
+    used_colors["count"] = used_colors["code"].map(usage_dict) # add count colums to DataFrame
+    used_colors = used_colors.sort_values(by="count", ascending=False).reset_index(drop=True) # sort
+
+    # pdf init
     page_width, page_height = A4
-    c = canvas.Canvas(output_path, pagesize=A4)
+    c = canvas.Canvas(output_path, pagesize=A4) 
 
+    # calculate cell size
     margin_mm = 15
     margin = margin_mm * mm
+    max_cells_per_page = 60
     cell = calculate_optimal_cell_size(max_cells_per_page, max_cells_per_page, margin_mm) * mm
 
-    max_cells_per_page = 60
+    # count the number of pages needed to portray the pattern in all width/height
     num_pages_x = max(1, int(np.ceil(n_cols / max_cells_per_page)))
     num_pages_y = max(1, int(np.ceil(n_rows / max_cells_per_page)))
 
@@ -74,16 +132,17 @@ def export_pattern_to_pdf(
     rows_per_page = int(np.ceil(n_rows / num_pages_y))
 
     total_pattern_pages = num_pages_x * num_pages_y
-   
+
+    # calculate the surface for drawing pattern/grid by substracting margins from each side
     printable_width = page_width - 2 * margin
     printable_height = page_height - 2 * margin
 
-    for page_y in range(num_pages_y):
+    for page_y in range(num_pages_y): # loop iterating by every row page
         row_start = page_y * rows_per_page
         row_end = min(row_start + rows_per_page, n_rows)
         cells_this_page_rows = row_end - row_start
 
-        for page_x in range(num_pages_x):
+        for page_x in range(num_pages_x): # loop iterating by every col page
             col_start = page_x * cols_per_page
             col_end = min(col_start + cols_per_page, n_cols)
             cells_this_page_cols = col_end - col_start
@@ -180,8 +239,6 @@ def export_pattern_to_pdf(
             c.drawCentredString(page_width / 2, page_height - 20 * mm, header_line_2)
 
             # page number
-            current_page_num = page_y * num_pages_x + page_x + 1
-            
             c.setFont("Helvetica", 9)
             
             page_center_x = page_width / 2
@@ -191,7 +248,8 @@ def export_pattern_to_pdf(
             c.drawCentredString(page_center_x, footer_y, page_text)
 
             c.showPage()
-
+    
+    draw_legend_page(c, used_colors, code_to_symbol, page_width, page_height)
     c.save()
 
 
