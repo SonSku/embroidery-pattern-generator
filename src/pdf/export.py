@@ -5,6 +5,10 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 import string
+import io
+from PIL import Image
+from reportlab.lib.utils import ImageReader
+from src.pdf.preview import render_preview_image_rgb
 
 
 """EMBROIDERY_SYMBOLS = [
@@ -48,6 +52,59 @@ def get_symbol_color(lightness: float, threshold: float = 55.0) -> colors.Color:
         return colors.HexColor("#000000")
     else:
         return colors.HexColor("#FFFFFF")
+
+# draws a title page with pattern stats and a scaled-down preview image of the whole pattern
+def draw_title_page(
+    c: canvas.Canvas,
+    grid_codes: np.ndarray,
+    used_colors: pd.DataFrame,
+    dmc_df: pd.DataFrame,
+    page_width: float,
+    page_height: float,
+    margin: float,
+) -> None:
+    n_rows, n_cols = grid_codes.shape
+
+    # render preview in memory instead of saving to disk
+    preview_rgb = render_preview_image_rgb(grid_codes, dmc_df)
+    pil_image = Image.fromarray(preview_rgb)
+
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")
+    buffer.seek(0)
+    image_reader = ImageReader(buffer)
+
+    # title
+    c.setFillColor(colors.HexColor("#000000"))
+    c.setFont("Helvetica-Bold", 22)
+    c.drawCentredString(page_width / 2, page_height - margin, "Embroidery Pattern Preview")
+
+    # subtitle with pattern stats
+    c.setFont("Helvetica", 12)
+    subtitle = f"{n_cols} x {n_rows} stitches  |  {len(used_colors)} DMC colors  |  {n_rows * n_cols} total stitches"
+    c.drawCentredString(page_width / 2, page_height - margin - 10 * mm, subtitle)
+
+    # available space for the image - rest of the page below the subtitle
+    available_width = page_width - 2 * margin
+    top = page_height - margin - 20 * mm
+    bottom = margin
+    available_height = top - bottom
+
+    img_w, img_h = pil_image.size
+    aspect = img_w / img_h
+
+    # fit image into available space while keeping aspect ratio
+    draw_width = available_width
+    draw_height = draw_width / aspect
+    if draw_height > available_height:
+        draw_height = available_height
+        draw_width = draw_height * aspect
+
+    # center the image in the available space
+    x = (page_width - draw_width) / 2
+    y = bottom + (available_height - draw_height) / 2
+
+    c.drawImage(image_reader, x, y, width=draw_width, height=draw_height, preserveAspectRatio=True, mask="auto")
 
 # function for drawing color legend in pdf
 def draw_legend_page(
@@ -136,6 +193,9 @@ def export_pattern_to_pdf(
     # calculate the surface for drawing pattern/grid by substracting margins from each side
     printable_width = page_width - 2 * margin
     printable_height = page_height - 2 * margin
+
+    draw_title_page(c, grid_codes, used_colors, dmc_df, page_width, page_height, margin)
+    c.showPage()
 
     for page_y in range(num_pages_y): # loop iterating by every row page
         row_start = page_y * rows_per_page
