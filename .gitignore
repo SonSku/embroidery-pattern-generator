@@ -1,6 +1,10 @@
 venv/
+test_images/
 
 __pycache__/
 *.pyc
 *.txt
 *.pdf
+
+preview_pixelart.png
+preview_scaled.png
